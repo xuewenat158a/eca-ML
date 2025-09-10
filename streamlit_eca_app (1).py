@@ -6,6 +6,7 @@ import inspect
 from pathlib import Path
 from io import BytesIO
 from datetime import datetime
+from sklearn.metrics import make_scorer  # <-- add this
 
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
@@ -230,29 +231,51 @@ ax.set_xlabel("Mean importance (validation)")
 ax.set_ylabel("Feature")
 st.pyplot(fig, clear_figure=True)
 
-# ---------- NEW: Per-target Permutation Importance ----------
+# ---------- Per-target Permutation Importance ----------
 with st.expander("Permutation importance by target", expanded=False):
+
+    # custom scorer that only evaluates the i-th output column
+    def r2_single_output(y_true, y_pred, *, idx):
+        # y_pred is (n_samples, n_outputs); pick the i-th column
+        return r2_score(y_true, y_pred[:, idx])
+
     for i, tgt in enumerate(target_cols):
+        # make a scorer bound to this target index
+        scorer_i = make_scorer(r2_single_output, greater_is_better=True, idx=i)
+
         with st.spinner(f"Computing permutation importance for {tgt}..."):
             res_t = permutation_importance(
-                pipe, X_test, y_test.iloc[:, [i]], n_repeats=10,
-                random_state=random_state, n_jobs=-1, scoring="r2"
+                pipe,
+                X_test,
+                y_test.iloc[:, i].to_numpy(),   # <- 1D y for target i
+                n_repeats=10,
+                random_state=random_state,
+                n_jobs=-1,
+                scoring=scorer_i,               # <- use our single-output scorer
             )
+
         names_t = get_transformed_feature_names(pipe.named_steps["prep"], num_cols, cat_cols)
         mean_t = res_t.importances_mean
         if len(names_t) != len(mean_t):
-            names_t = [f"f{i}" for i in range(len(mean_t))]
-        pi_t = (pd.DataFrame({"expanded_feature": names_t, "imp": mean_t})
-                .assign(base_feature=lambda d: d["expanded_feature"].apply(base_feature))
-                .groupby("base_feature")["imp"]
-                .sum()
-                .sort_values(ascending=False)
-                .reset_index()
-                .rename(columns={"imp": "importance"}))
+            names_t = [f"f{j}" for j in range(len(mean_t))]
+
+        def base_feature(name):
+            for c in cat_cols:
+                if name.startswith(c + "_"):
+                    return c
+            return name
+
+        pi_t = (
+            pd.DataFrame({"expanded_feature": names_t, "importance": mean_t})
+            .assign(base_feature=lambda d: d["expanded_feature"].apply(base_feature))
+            .groupby("base_feature", as_index=False)["importance"]
+            .sum()
+            .sort_values("importance", ascending=False)
+        )
+
         st.write(f"**Target:** {tgt}")
         st.dataframe(pi_t, use_container_width=True)
 
-        # single-plot bar (default colors)
         fig_t, ax_t = plt.subplots(figsize=(8, max(3, len(pi_t)*0.4)))
         ax_t.barh(pi_t["base_feature"], pi_t["importance"])
         ax_t.invert_yaxis()
@@ -260,6 +283,7 @@ with st.expander("Permutation importance by target", expanded=False):
         ax_t.set_xlabel("Mean importance (validation)")
         ax_t.set_ylabel("Feature")
         st.pyplot(fig_t, clear_figure=True)
+
 
 # ---------- Diagnostics: Actual vs Predicted ----------
 with st.expander("Diagnostics: Actual vs Predicted (per target)", expanded=False):
